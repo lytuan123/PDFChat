@@ -1,121 +1,101 @@
 from PyPDF2 import PdfReader
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain.chat_models import ChatOpenAI
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
-import pickle
-from pathlib import Path
+from langchain_community.chat_models import ChatOpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 import os
-import streamlit as st
-from streamlit_chat import message
-import io
-import asyncio
+import gradio as gr
 
+# Tải các biến môi trường từ file .env
 load_dotenv()
-api_key = os.getenv('OPENAI_API_KEY')  
 
-# vectors = getDocEmbeds("gpt4.pdf")
-# qa = ChatVectorDBChain.from_llm(ChatOpenAI(model_name="gpt-3.5-turbo"), vectors, return_source_documents=True)
+# Lấy giá trị của biến OPENAI_API_KEY từ môi trường
+api_key = os.getenv('OPENAI_API_KEY')
 
-async def main():
+if not api_key:
+    raise ValueError("API key not found. Please ensure it is set correctly in your environment or .env file.")
 
-    async def storeDocEmbeds(file, filename):
-    
-        reader = PdfReader(file)
-        corpus = ''.join([p.extract_text() for p in reader.pages if p.extract_text()])
-        
-        splitter =  RecursiveCharacterTextSplitter(chunk_size=1000,chunk_overlap=200,)
+def storeDocEmbeds(file_path, filename):
+    try:
+        with open(file_path, "rb") as file:
+            reader = PdfReader(file)
+            corpus = ''.join([p.extract_text() for p in reader.pages if p.extract_text()])
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         chunks = splitter.split_text(corpus)
-        
-        embeddings = OpenAIEmbeddings(openai_api_key = api_key)
+
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         vectors = FAISS.from_texts(chunks, embeddings)
-        
-        with open(filename + ".pkl", "wb") as f:
-            pickle.dump(vectors, f)
 
-        
-    async def getDocEmbeds(file, filename):
-        
-        if not os.path.isfile(filename + ".pkl"):
-            await storeDocEmbeds(file, filename)
-        
-        with open(filename + ".pkl", "rb") as f:
-            global vectores
-            vectors = pickle.load(f)
-            
-        return vectors
+        # Lưu trữ FAISS index
+        vectors.save_local(filename + "_faiss")
+    except Exception as e:
+        return str(e)
+
+def getDocEmbeds(file_path, filename):
+    try:
+        if not os.path.exists(filename + "_faiss"):
+            error = storeDocEmbeds(file_path, filename)
+            if error:
+                return None, error
+
+        # Tải lại FAISS index với `allow_dangerous_deserialization`
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        vectors = FAISS.load_local(filename + "_faiss", embeddings, allow_dangerous_deserialization=True)
+
+        return vectors, None
+    except Exception as e:
+        return None, str(e)
+
+def conversational_chat(query, history, vectors):
+    try:
+        llm = ChatOpenAI(model_name="gpt-3.5-turbo")  # Thay đổi model nhẹ hơn
+        qa = ConversationalRetrievalChain.from_llm(llm, retriever=vectors.as_retriever(), return_source_documents=True)
+        result = qa({"question": query, "chat_history": history})
+        history.append((query, result["answer"]))
+        return result["answer"], history, None
+    except Exception as e:
+        return None, history, str(e)
+
+def upload_and_process_pdf(uploaded_file_path):
+    if uploaded_file_path is not None:
+        try:
+            vectors, error = getDocEmbeds(uploaded_file_path, "uploaded_file")
+            if error:
+                return "Error: " + error, None
+            return "Upload successful. You can now ask questions.", vectors
+        except Exception as e:
+            return "Error: " + str(e), None
+    return "Please upload a PDF file.", None
+
+def chat_interface(query, vectors, history):
+    if vectors is not None:
+        response, history, error = conversational_chat(query, history, vectors)
+        if error:
+            return "Error: " + error, history
+        return response, history
+    return "Please upload a PDF file and try again.", history
+
+with gr.Blocks() as demo:
+    history = gr.State([])
+    vectors = gr.State(None)
     
+    gr.Markdown("# PDFChat : Ask questions about your PDF")
 
-    async def conversational_chat(query):
-        result = qa({"question": query, "chat_history": st.session_state['history']})
-        st.session_state['history'].append((query, result["answer"]))
-        # print("Log: ")
-        # print(st.session_state['history'])
-        return result["answer"]
+    with gr.Row():
+        with gr.Column():
+            upload = gr.File(label="Upload PDF", type="filepath")
+            upload_button = gr.Button("Process PDF")
+        with gr.Column():
+            status = gr.Textbox(label="Status", interactive=False)
 
+    upload_button.click(upload_and_process_pdf, inputs=[upload], outputs=[status, vectors])
 
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo")
-    chain = load_qa_chain(llm, chain_type="stuff")
+    query = gr.Textbox(label="Ask a question")
+    response = gr.Textbox(label="Response", interactive=False)
+    
+    query.submit(chat_interface, inputs=[query, vectors, history], outputs=[response, history])
 
-    if 'history' not in st.session_state:
-        st.session_state['history'] = []
-
-
-    #Creating the chatbot interface
-    st.title("PDFChat :")
-
-    if 'ready' not in st.session_state:
-        st.session_state['ready'] = False
-
-    uploaded_file = st.file_uploader("Choose a file", type="pdf")
-
-    if uploaded_file is not None:
-
-        with st.spinner("Processing..."):
-        # Add your code here that needs to be executed
-            uploaded_file.seek(0)
-            file = uploaded_file.read()
-            # pdf = PyPDF2.PdfFileReader()
-            vectors = await getDocEmbeds(io.BytesIO(file), uploaded_file.name)
-            qa = ConversationalRetrievalChain.from_llm(ChatOpenAI(model_name="gpt-3.5-turbo"), retriever=vectors.as_retriever(), return_source_documents=True)
-
-        st.session_state['ready'] = True
-
-    st.divider()
-
-    if st.session_state['ready']:
-
-        if 'generated' not in st.session_state:
-            st.session_state['generated'] = ["Welcome! You can now ask any questions regarding " + uploaded_file.name]
-
-        if 'past' not in st.session_state:
-            st.session_state['past'] = ["Hey!"]
-
-        # container for chat history
-        response_container = st.container()
-
-        # container for text box
-        container = st.container()
-
-        with container:
-            with st.form(key='my_form', clear_on_submit=True):
-                user_input = st.text_input("Query:", placeholder="e.g: Summarize the paper in a few sentences", key='input')
-                submit_button = st.form_submit_button(label='Send')
-
-            if submit_button and user_input:
-                output = await conversational_chat(user_input)
-                st.session_state['past'].append(user_input)
-                st.session_state['generated'].append(output)
-
-        if st.session_state['generated']:
-            with response_container:
-                for i in range(len(st.session_state['generated'])):
-                    message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="thumbs")
-                    message(st.session_state["generated"][i], key=str(i), avatar_style="fun-emoji")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+demo.launch(share=True)
