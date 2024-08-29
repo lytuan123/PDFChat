@@ -38,7 +38,7 @@ previous_queries = ""
 
 def generate_answer_with_rag(query, vectors, previous_queries):
     # Tạo mô hình ngôn ngữ
-    llm = ChatOpenAI(model_name="gpt-4", openai_api_key=api_key)
+    llm = ChatOpenAI(model_name="gpt-4o-mini", openai_api_key=api_key)
     
     # Kết hợp các câu hỏi trước đó với câu hỏi hiện tại để tạo ngữ cảnh
     contextual_query = f"{previous_queries} {query}"
