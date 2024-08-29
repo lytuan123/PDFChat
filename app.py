@@ -1,3 +1,4 @@
+# Các thư viện cần thiết
 from PyPDF2 import PdfReader
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -8,7 +9,7 @@ import json
 import re
 import gradio as gr
 from langchain_community.chat_models import ChatOpenAI
-from langchain.chains.question_answering import load_qa_chain
+from langchain.chains import RetrievalQA  # Thay vì ConversationalRetrievalChain
 
 # Tải các biến môi trường từ file .env
 load_dotenv()
@@ -25,26 +26,57 @@ def create_faiss_index(file_path):
         reader = PdfReader(file)
         corpus = ''.join([p.extract_text() for p in reader.pages if p.extract_text()])
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=300)
     chunks = splitter.split_text(corpus)
 
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectors = FAISS.from_texts(chunks, embeddings)
     return vectors
-# Tìm các đoạn văn bản liên quan từ FAISS
-def retrieve_relevant_chunks(query, vectors):
-    return vectors.similarity_search(query, k=5)  # Trả về 5 đoạn văn bản liên quan nhất
 
-# Tạo câu trả lời bằng cách sử dụng RAG
-def generate_answer_with_rag(query, vectors):
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo")  # Sử dụng GPT-3.5 Turbo hoặc GPT-4
-    relevant_chunks = retrieve_relevant_chunks(query, vectors)
+# Hàm trả lời câu hỏi với ngữ cảnh và lưu ngữ cảnh
+previous_queries = ""
+
+def generate_answer_with_rag(query, vectors, previous_queries):
+    # Tạo mô hình ngôn ngữ
+    llm = ChatOpenAI(model_name="gpt-4", openai_api_key=api_key)
     
-    # Kết hợp các đoạn văn bản liên quan với truy vấn
-    context = " ".join([chunk.page_content for chunk in relevant_chunks])
+    # Kết hợp các câu hỏi trước đó với câu hỏi hiện tại để tạo ngữ cảnh
+    contextual_query = f"{previous_queries} {query}"
 
-    chain = load_qa_chain(llm, chain_type="stuff")
-    return chain.run(input_documents=relevant_chunks, question=query)
+    # Tạo chuỗi truy xuất với khả năng truy vấn từ chỉ mục FAISS
+    qa_chain = RetrievalQA.from_chain_type(llm, retriever=vectors.as_retriever(), return_source_documents=True)
+
+    # Thực hiện truy vấn với ngữ cảnh và lấy kết quả
+    result = qa_chain({"query": contextual_query})
+
+    # Trả về kết quả từ trường 'result'
+    return result['result']
+
+def answer_query_with_rag(query, vectors):
+    global previous_queries  # Sử dụng biến toàn cục để duy trì ngữ cảnh
+    try:
+        query = normalize_query(query)
+        feedback = load_feedback()
+        if query in feedback:
+            return feedback[query]  # Trả lời từ phản hồi đã lưu
+
+        # Lấy câu trả lời từ hàm generate_answer_with_rag
+        answer = generate_answer_with_rag(query, vectors, previous_queries)
+        
+        # Cập nhật previous_queries với câu hỏi và câu trả lời hiện tại
+        previous_queries += f"Q: {query} A: {answer} "
+        
+        return answer
+    except Exception as e:
+        return f"Lỗi khi xử lý truy vấn: {str(e)}"
+
+
+# Chuẩn hóa câu hỏi
+def normalize_query(query):
+    query = query.lower().strip()
+    query = re.sub(r'\W+', ' ', query)
+    return query
+
 # Load feedback từ file JSON
 def load_feedback():
     if os.path.exists("feedback.json"):
@@ -59,23 +91,6 @@ def save_feedback(query, correct_answer):
     with open("feedback.json", "w") as f:
         json.dump(feedback, f)
 
-# Chuẩn hóa câu hỏi
-def normalize_query(query):
-    query = query.lower().strip()
-    query = re.sub(r'\W+', ' ', query)
-    return query
-
-# Trả lời câu hỏi và xử lý phản hồi người dùng
-def answer_query_with_rag(query, vectors):
-    try:
-        query = normalize_query(query)
-        feedback = load_feedback()
-        if query in feedback:
-            return feedback[query]  # Trả lời từ phản hồi đã lưu
-
-        return generate_answer_with_rag(query, vectors)
-    except Exception as e:
-        return f"Lỗi khi xử lý truy vấn: {str(e)}"
 # Xử lý upload và xử lý PDF
 def upload_and_process_pdf(uploaded_file_path):
     if uploaded_file_path is not None:
