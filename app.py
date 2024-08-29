@@ -124,4 +124,5 @@ with gr.Blocks() as demo:
     query.submit(answer_query_with_rag, inputs=[query, vectors], outputs=response)
     feedback_button.click(save_feedback, inputs=[query, user_feedback], outputs=None)
 
-demo.launch(share=True)
+if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0", server_port=8000)
