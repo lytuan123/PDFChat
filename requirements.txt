@@ -1,7 +1,8 @@
-PyPDF2 
+PyPDF2
 langchain
 openai
 faiss-cpu
 tiktoken
 python-dotenv
 gradio
+langchain-community
